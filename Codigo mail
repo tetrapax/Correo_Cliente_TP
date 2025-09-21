@@ -1,0 +1,289 @@
+import datetime
+import heapq
+import collections
+import os
+
+class Mensaje:
+    def __init__(self, remitente, destinatario, asunto, contenido):
+        self._remitente = remitente
+        self._destinatario = destinatario
+        self._asunto = asunto
+        self._contenido = contenido
+        self._fecha = datetime.datetime.now()
+        self._leido = False
+
+    def get_remitente(self):
+        return self._remitente
+
+    def get_destinatario(self):
+        return self._destinatario
+
+    def get_asunto(self):
+        return self._asunto
+
+    def get_contenido(self):
+        return self._contenido
+
+    def marcar_leido(self):
+        self._leido = True
+
+    def __str__(self):
+        return (f"De: {self._remitente}\nPara: {self._destinatario}\nAsunto: {self._asunto}\n"
+                f"Fecha: {self._fecha.strftime('%Y-%m-%d %H:%M:%S')}\nContenido:\n{self._contenido}")
+
+class Carpeta:
+    def __init__(self, nombre):
+        self._nombre = nombre
+        self._mensajes = []
+        self._subcarpetas = {}
+
+    def get_nombre(self):
+        return self._nombre
+
+    def get_mensajes(self):
+        return self._mensajes
+
+    def get_subcarpeta(self, nombre):
+        return self._subcarpetas.get(nombre)
+
+    def agregar_mensaje(self, mensaje):
+        self._mensajes.append(mensaje)
+
+    def agregar_subcarpeta(self, subcarpeta):
+        if subcarpeta.get_nombre() in self._subcarpetas:
+            return False
+        self._subcarpetas[subcarpeta.get_nombre()] = subcarpeta
+        return True
+
+    def listar_mensajes(self):
+        if not self._mensajes:
+            print(f"La carpeta '{self._nombre}' está vacía.")
+            return
+
+        print(f"--- Mensajes en '{self._nombre}' ---")
+        for i, mensaje in enumerate(self._mensajes):
+            estado_leido = "Leído" if mensaje._leido else "No leído"
+            print(f"[{i}] {estado_leido} | De: {mensaje.get_remitente()} | Asunto: {mensaje.get_asunto()}")
+
+class Usuario:
+    def __init__(self, email, contrasena):
+        self._email = email
+        self._contrasena = contrasena
+        self.inbox = Carpeta("inbox")
+        self.sent = Carpeta("sent")
+        self.carpetas_personalizadas = {}
+        self._filtros_reglas = []
+        self._cola_prioridad = []
+
+    def get_email(self):
+        return self._email
+
+    def _navegar_a_carpeta(self, ruta):
+        partes = ruta.split('/')
+        carpeta_actual = None
+        if partes[0] == "inbox":
+            carpeta_actual = self.inbox
+        elif partes[0] == "sent":
+            carpeta_actual = self.sent
+        else:
+            carpeta_actual = self.carpetas_personalizadas.get(partes[0])
+
+        for parte in partes[1:]:
+            if carpeta_actual:
+                carpeta_actual = carpeta_actual.get_subcarpeta(parte)
+            else:
+                return None
+        return carpeta_actual
+
+    def enviar_mensaje(self, destinatario, asunto, contenido, servidor):
+        mensaje = Mensaje(self._email, destinatario, asunto, contenido)
+        self.sent.agregar_mensaje(mensaje)
+        servidor.enviar(mensaje)
+
+    def recibir_mensaje(self, mensaje):
+        for filtro in self._filtros_reglas:
+            if filtro['tipo_regla'] == 'remitente' and filtro['valor_regla'] in mensaje.get_remitente():
+                filtro['carpeta_destino'].agregar_mensaje(mensaje)
+                return
+            if filtro['tipo_regla'] == 'asunto' and filtro['valor_regla'] in mensaje.get_asunto():
+                filtro['carpeta_destino'].agregar_mensaje(mensaje)
+                return
+        
+        if "🚨 urgente" in mensaje.get_asunto().lower():
+            heapq.heappush(self._cola_prioridad, (1, mensaje))
+        else:
+            self.inbox.agregar_mensaje(mensaje)
+    
+    def crear_carpeta(self, nombre, ruta_padre=None):
+        if ruta_padre is None:
+            self.carpetas_personalizadas[nombre] = Carpeta(nombre)
+        else:
+            padre = self._navegar_a_carpeta(ruta_padre)
+            if padre:
+                padre.agregar_subcarpeta(Carpeta(nombre))
+
+    def crear_filtro_dict(self, tipo_regla, valor_regla, carpeta_destino_ruta):
+        carpeta_destino = self._navegar_a_carpeta(carpeta_destino_ruta)
+        if carpeta_destino:
+            filtro = {'tipo_regla': tipo_regla, 'valor_regla': valor_regla, 'carpeta_destino': carpeta_destino}
+            self._filtros_reglas.append(filtro)
+
+class ServidorCorreo:
+    def __init__(self, nombre_dominio):
+        self._nombre = nombre_dominio
+        self._usuarios = {}
+        self._red = {}
+
+    def get_nombre(self):
+        return self._nombre
+
+    def registrar_usuario(self, usuario):
+        self._usuarios[usuario.get_email()] = usuario
+
+    def agregar_conexion(self, servidor_destino):
+        if self._nombre not in self._red: self._red[self._nombre] = []
+        if servidor_destino not in self._red: self._red[servidor_destino] = []
+        self._red[self._nombre].append(servidor_destino)
+        self._red[servidor_destino].append(self._nombre)
+
+    def _encontrar_ruta_bfs(self, origen, destino):
+        cola = collections.deque([[origen]])
+        visitados = {origen}
+        while cola:
+            ruta = cola.popleft()
+            nodo_actual = ruta[-1]
+            if nodo_actual == destino: return ruta
+            for vecino in self._red.get(nodo_actual, []):
+                if vecino not in visitados:
+                    visitados.add(vecino)
+                    nueva_ruta = list(ruta)
+                    nueva_ruta.append(vecino)
+                    cola.append(nueva_ruta)
+        return None
+
+    def enviar(self, mensaje):
+        destinatario_email = mensaje.get_destinatario()
+        dominio_destino = destinatario_email.split('@')[1]
+        
+        if dominio_destino == self._nombre:
+            if destinatario_email in self._usuarios:
+                self._usuarios[destinatario_email].recibir_mensaje(mensaje)
+        else:
+            ruta = self._encontrar_ruta_bfs(self._nombre, dominio_destino)
+            if ruta:
+                servidor_destino_obj = servidores.get(dominio_destino)
+                if servidor_destino_obj and destinatario_email in servidor_destino_obj._usuarios:
+                    servidor_destino_obj._usuarios[destinatario_email].recibir_mensaje(mensaje)
+
+# --- Interfaz de Usuario ---
+def clear_screen():
+    os.system('cls' if os.name == 'nt' else 'clear')
+
+def menu_usuario(usuario_actual, servidor_actual):
+    while True:
+        clear_screen()
+        print(f"\n--- Sesión de {usuario_actual.get_email()} ---")
+        print("1. Enviar mensaje")
+        print("2. Ver bandeja de entrada")
+        print("3. Ver mensajes en otra carpeta")
+        print("4. Cerrar sesión")
+        
+        opcion = input("Seleccione una opción: ")
+
+        if opcion == '1':
+            destinatario = input("Destinatario: ")
+            asunto = input("Asunto: ")
+            contenido = input("Contenido: ")
+            usuario_actual.enviar_mensaje(destinatario, asunto, contenido, servidor_actual)
+            input("Mensaje enviado. Presione Enter para continuar...")
+        
+        elif opcion == '2':
+            usuario_actual.inbox.listar_mensajes()
+            leer_mensaje(usuario_actual.inbox)
+        
+        elif opcion == '3':
+            ruta_carpeta = input("Ruta de la carpeta (ej: sent, Personal/Amigos): ")
+            carpeta = usuario_actual._navegar_a_carpeta(ruta_carpeta)
+            if carpeta:
+                carpeta.listar_mensajes()
+                leer_mensaje(carpeta)
+            else:
+                print("Ruta de carpeta no válida.")
+            input("Presione Enter para continuar...")
+
+        elif opcion == '4':
+            print("Cerrando sesión.")
+            break
+
+def leer_mensaje(carpeta):
+    try:
+        if not carpeta.get_mensajes():
+            return
+        
+        indice = int(input("Ingrese el índice del mensaje para leerlo (-1 para volver): "))
+        if indice == -1:
+            return
+        
+        mensaje = carpeta.get_mensajes()[indice]
+        mensaje.marcar_leido()
+        clear_screen()
+        print("\n--- Leyendo Mensaje ---")
+        print(mensaje)
+        input("\nPresione Enter para continuar...")
+
+    except (ValueError, IndexError):
+        print("Selección no válida.")
+        input("Presione Enter para continuar...")
+
+# --- Lógica principal del programa ---
+servidores = {}
+servidor_a = ServidorCorreo("correo.com")
+servidor_b = ServidorCorreo("email.net")
+servidor_c = ServidorCorreo("host.org")
+
+servidores[servidor_a.get_nombre()] = servidor_a
+servidores[servidor_b.get_nombre()] = servidor_b
+servidores[servidor_c.get_nombre()] = servidor_c
+
+servidor_a.agregar_conexion(servidor_b.get_nombre())
+servidor_b.agregar_conexion(servidor_c.get_nombre())
+
+# Creación de usuarios de ejemplo
+lucas = Usuario("lucas@correo.com", "pass123")
+juan = Usuario("juan@email.net", "pass456")
+charlie = Usuario("charlie@correo.com", "pass789")
+
+servidor_a.registrar_usuario(lucas)
+servidor_b.registrar_usuario(juan)
+servidor_a.registrar_usuario(charlie)
+
+# Configuración inicial para demostración
+lucas.crear_carpeta("Personal")
+lucas.crear_filtro_dict("remitente", "juan@email.net", "Personal")
+juan.enviar_mensaje("lucas@correo.com", "Hola de nuevo!", "Te escribo para saludarte.", servidor_b)
+charlie.enviar_mensaje("lucas@correo.com", "🚨 Urgente: Revisar el reporte trimestral", "Es importante que lo veas hoy.", servidor_a)
+
+# Bucle principal de inicio de sesión
+while True:
+    clear_screen()
+    print("\n--- Cliente de Correo ---")
+    print("1. Iniciar sesión")
+    print("2. Salir")
+    opcion = input("Seleccione una opción: ")
+
+    if opcion == '1':
+        email = input("Email: ")
+        contrasena = input("Contraseña: ")
+        dominio = email.split('@')[-1]
+        
+        servidor = servidores.get(dominio)
+        if servidor and email in servidor._usuarios and servidor._usuarios[email]._contrasena == contrasena:
+            print("Inicio de sesión exitoso.")
+            menu_usuario(servidor._usuarios[email], servidor)
+        else:
+            print("Credenciales incorrectas.")
+        input("Presione Enter para continuar...")
+
+    elif opcion == '2':
+        print("Saliendo...")
+        break
